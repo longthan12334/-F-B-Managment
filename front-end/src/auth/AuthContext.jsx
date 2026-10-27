@@ -1,9 +1,9 @@
 // =============================================================================
 //  AuthContext — quản lý user/token, lắng nghe session-expired để redirect
 // =============================================================================
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Api, AuthEvents, tokenStore } from '../api/client';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/Toast';
 
 const AuthCtx = createContext(null);
@@ -12,6 +12,9 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => tokenStore.user);
   const [booting, setBooting] = useState(true);
   const navigate = useNavigate();
+  const location = useLocation();
+  const pathnameRef = useRef(location.pathname);
+  pathnameRef.current = location.pathname;
   const toast = useToast();
 
   // Khi mount: nếu có token → gọi /auth/me để verify còn sống và lấy user mới nhất
@@ -31,6 +34,13 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     const off = AuthEvents.on('session-expired', () => {
       setUser(null);
+      // Phiên nhân viên hết hạn không được đưa khách quét QR về login.
+      const pathname = pathnameRef.current;
+      const isPublicCustomerPage =
+        pathname === '/customer' ||
+        pathname.startsWith('/customer/') ||
+        pathname === '/demo/qr';
+      if (isPublicCustomerPage) return;
       toast.err('Phiên đã hết hạn', 'Vui lòng đăng nhập lại.');
       navigate('/login', { replace: true });
     });
