@@ -26,6 +26,9 @@ public enum GuestOrderStatus
     Cancelled = 4,
 }
 
+// BE-2
+public enum StaffCallStatus { Pending = 0, Acknowledged = 1, Done = 2 }
+
 public static class EnumMappings
 {
     public static string ToDbString(this GuestTableSessionStatus s) => s switch
@@ -76,6 +79,22 @@ public static class EnumMappings
             (GuestOrderStatus.Preparing,           GuestOrderStatus.Cancelled)  => true,
             _ => false,
         };
+    // BE-2: StaffCallStatus mapping
+    public static string ToDbString(this StaffCallStatus s) => s switch
+    {
+        StaffCallStatus.Pending      => "pending",
+        StaffCallStatus.Acknowledged => "acknowledged",
+        StaffCallStatus.Done         => "done",
+        _ => throw new ArgumentOutOfRangeException(nameof(s), s, null),
+    };
+
+    public static StaffCallStatus ToStaffCallStatus(this string v) => v switch
+    {
+        "pending"      => StaffCallStatus.Pending,
+        "acknowledged" => StaffCallStatus.Acknowledged,
+        "done"         => StaffCallStatus.Done,
+        _ => throw new ArgumentException($"staff call status '{v}' không hợp lệ.", nameof(v)),
+    };
 }
 
 // ─── 2. Value Objects ───────────────────────────────────────────────────────
@@ -485,5 +504,69 @@ public sealed class GuestOrder : Entity
         var ts = now.UtcDateTime.ToString("yyMMddHHmmss");
         var rand = Guid.NewGuid().ToString("N").Substring(0, 4).ToLowerInvariant();
         return $"GST-{ts}-{rand}";
+    }
+}
+
+// ─── 6. BE-2 Entities ──────────────────────────────────────────────────────
+
+/// <summary>Đánh giá đơn: 1-1 với GuestOrder, chỉ cho khi status='served'.</summary>
+public sealed class GuestOrderFeedback : Entity
+{
+    public Guid GuestOrderId { get; private set; }
+    public short Rating { get; private set; }
+    public string? Comment { get; private set; }
+    public DateTimeOffset CreatedAt { get; private set; }
+
+    private GuestOrderFeedback() { }
+    private GuestOrderFeedback(Guid id, Guid guestOrderId, short rating,
+        string? comment, DateTimeOffset now) : base(id)
+    {
+        GuestOrderId = guestOrderId; Rating = rating; Comment = comment; CreatedAt = now;
+    }
+
+    public static GuestOrderFeedback Create(Guid guestOrderId, int rating,
+        string? comment, DateTimeOffset now)
+    {
+        if (guestOrderId == Guid.Empty)
+            throw new ArgumentException("guestOrderId rỗng.", nameof(guestOrderId));
+        if (rating < 1 || rating > 5)
+            throw new ArgumentOutOfRangeException(nameof(rating), "Rating [1, 5].");
+
+        return new GuestOrderFeedback(Guid.NewGuid(), guestOrderId, (short)rating,
+            comment is { Length: > 500 } ? comment.Substring(0, 500) : comment, now);
+    }
+}
+
+/// <summary>Yêu cầu "gọi nhân viên" — khách bấm nút ở FE-1.</summary>
+public sealed class StaffCall : Entity
+{
+    public Guid TableSessionId { get; private set; }
+    public string TableCode { get; private set; } = string.Empty;
+    public string Reason { get; private set; } = string.Empty;
+    public StaffCallStatus Status { get; private set; }
+    public Guid? AcknowledgedBy { get; private set; }
+    public DateTimeOffset? AcknowledgedAt { get; private set; }
+    public DateTimeOffset CreatedAt { get; private set; }
+
+    private StaffCall() { }
+    private StaffCall(Guid id, Guid tableSessionId, string tableCode,
+        string reason, DateTimeOffset now) : base(id)
+    {
+        TableSessionId = tableSessionId; TableCode = tableCode;
+        Reason = reason; Status = StaffCallStatus.Pending; CreatedAt = now;
+    }
+
+    public static StaffCall Create(Guid tableSessionId, string tableCode,
+        string reason, DateTimeOffset now)
+    {
+        if (tableSessionId == Guid.Empty)
+            throw new ArgumentException("tableSessionId rỗng.", nameof(tableSessionId));
+        if (string.IsNullOrWhiteSpace(tableCode))
+            throw new ArgumentException("tableCode rỗng.", nameof(tableCode));
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("reason rỗng.", nameof(reason));
+
+        var trimmed = reason.Length > 100 ? reason.Substring(0, 100) : reason;
+        return new StaffCall(Guid.NewGuid(), tableSessionId, tableCode, trimmed, now);
     }
 }

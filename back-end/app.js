@@ -15,6 +15,8 @@ const invoiceRoutes   = require('./src/routes/invoiceRoutes');
 const fileRoutes      = require('./src/routes/fileRoutes');
 const statRoutes      = require('./src/routes/statRoutes');
 const logRoutes       = require('./src/routes/logRoutes');
+// BE-2: endpoint staff xác nhận đơn QR và nhận yêu cầu "gọi nhân viên" (gộp 1 file)
+const { guestOrderRouter, staffCallRouter } = require('./src/routes/qrOrderingRoutes');
 
 const app = express();
 
@@ -89,6 +91,9 @@ app.use('/api/invoices', invoiceRoutes);
 app.use('/api/files',    fileRoutes);
 app.use('/api/stats',    statRoutes);
 app.use('/api/logs',     logRoutes);
+// BE-2 endpoints
+app.use('/api/guest-orders', guestOrderRouter);
+app.use('/api/staff-calls',  staffCallRouter);
 
 // ─── ERROR ───────────────────────────────────────────────────────────────────
 app.use(notFoundHandler);

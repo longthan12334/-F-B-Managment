@@ -33,6 +33,7 @@ public sealed class CustomerOrderingModule : IModule
         services.AddScoped<MenuService>();
         services.AddScoped<SessionService>();
         services.AddScoped<OrderService>();
+        services.AddScoped<StaffCallService>();   // BE-2
 
         // 3. Infrastructure
         services.AddMemoryCache();
@@ -79,6 +80,18 @@ public sealed class CustomerOrderingModule : IModule
                     _ => new FixedWindowRateLimiterOptions
                     {
                         PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0,
+                    });
+            });
+
+            // BE-2: gọi nhân viên — chặt (2/phút/session) chống spam.
+            options.AddPolicy("call-staff", http =>
+            {
+                var token = http.Request.Headers[RequireGuestSessionAttribute.HeaderName].ToString();
+                var key = !string.IsNullOrEmpty(token) ? $"sess:{token}" : $"ip:{http.Connection.RemoteIpAddress}";
+                return RateLimitPartition.GetFixedWindowLimiter(key,
+                    _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 2, Window = TimeSpan.FromMinutes(1), QueueLimit = 0,
                     });
             });
         });

@@ -45,6 +45,9 @@ public sealed class CustomerOrderingDbContext : DbContext
     public DbSet<GuestDeviceSession> GuestDeviceSessions => Set<GuestDeviceSession>();
     public DbSet<GuestOrder> GuestOrders => Set<GuestOrder>();
     public DbSet<GuestOrderItem> GuestOrderItems => Set<GuestOrderItem>();
+    // BE-2
+    public DbSet<GuestOrderFeedback> GuestOrderFeedbacks => Set<GuestOrderFeedback>();
+    public DbSet<StaffCall> StaffCalls => Set<StaffCall>();
 
     private static IPAddress? ParseIp(string? v) =>
         string.IsNullOrWhiteSpace(v) ? null : (IPAddress.TryParse(v, out var ip) ? ip : null);
@@ -150,6 +153,35 @@ public sealed class CustomerOrderingDbContext : DbContext
             b.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
             b.Ignore(x => x.DomainEvents);
             b.HasIndex(x => x.GuestOrderId);
+        });
+        // BE-2
+        mb.Entity<GuestOrderFeedback>(b =>
+        {
+            b.ToTable("guest_order_feedback");
+            b.HasKey(x => x.Id); b.Property(x => x.Id).HasColumnName("id");
+            b.Property(x => x.GuestOrderId).HasColumnName("guest_order_id").IsRequired();
+            b.Property(x => x.Rating).HasColumnName("rating").IsRequired();
+            b.Property(x => x.Comment).HasColumnName("comment");
+            b.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            b.Ignore(x => x.DomainEvents);
+            b.HasIndex(x => x.GuestOrderId).IsUnique();
+        });
+
+        mb.Entity<StaffCall>(b =>
+        {
+            b.ToTable("staff_calls");
+            b.HasKey(x => x.Id); b.Property(x => x.Id).HasColumnName("id");
+            b.Property(x => x.TableSessionId).HasColumnName("table_session_id").IsRequired();
+            b.Property(x => x.TableCode).HasColumnName("table_code").IsRequired();
+            b.Property(x => x.Reason).HasColumnName("reason").IsRequired();
+            b.Property(x => x.Status).HasColumnName("status")
+                .HasConversion(v => v.ToDbString(), v => v.ToStaffCallStatus()).IsRequired();
+            b.Property(x => x.AcknowledgedBy).HasColumnName("acknowledged_by");
+            b.Property(x => x.AcknowledgedAt).HasColumnName("acknowledged_at");
+            b.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();
+            b.Ignore(x => x.DomainEvents);
+            b.HasIndex(x => x.TableSessionId);
+            b.HasIndex(x => x.Status);
         });
     }
 

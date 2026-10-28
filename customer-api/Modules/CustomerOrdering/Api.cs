@@ -78,6 +78,51 @@ public sealed record GuestOrderItemDto(
     Guid Id, Guid MenuItemId, string ItemName, int Quantity,
     decimal Price, decimal TotalPrice, string? Notes);
 
+// BE-2 DTOs
+public sealed record CancelOrderRequest
+{
+    [MaxLength(200)]
+    public string? Reason { get; init; }
+}
+
+public sealed record OrderFeedbackRequest
+{
+    [Range(1, 5)]
+    public int Rating { get; init; }
+
+    [MaxLength(500)]
+    public string? Comment { get; init; }
+}
+
+/// <summary>Response tối thiểu khi tra đơn qua mã (không auth).</summary>
+public sealed record OrderMinimalDto(
+    string Code, string TableCode, string Status,
+    decimal TotalAmount, DateTimeOffset CreatedAt);
+
+/// <summary>
+/// Status-only response cho FE-1 polling realtime (mỗi 3-5s).
+/// Nhẹ hơn full GuestOrderDto — không items/notes, chỉ status + mốc thời gian cuối.
+/// </summary>
+public sealed record OrderStatusDto(
+    Guid Id, string Code, string Status,
+    DateTimeOffset UpdatedAt, DateTimeOffset? ConfirmedAt);
+
+/// <summary>Hóa đơn chi tiết — subtotal + VAT 8% + total.</summary>
+public sealed record OrderReceiptDto(
+    string Code, string TableCode, string Status,
+    IReadOnlyList<GuestOrderItemDto> Items,
+    decimal Subtotal, decimal VatRate, decimal VatAmount, decimal Total,
+    DateTimeOffset CreatedAt, DateTimeOffset? ConfirmedAt);
+
+public sealed record CreateStaffCallRequest
+{
+    [Required, MinLength(1), MaxLength(100)]
+    public string Reason { get; init; } = string.Empty;
+}
+
+public sealed record StaffCallDto(
+    Guid Id, string TableCode, string Reason, string Status, DateTimeOffset CreatedAt);
+
 // ─── 2. Security: SessionContext + Filter + AntiReplay middleware ──────────
 
 public sealed record GuestSessionContext(
@@ -326,13 +371,13 @@ public sealed class MenuController : ControllerBase
 
 [ApiController]
 [Route("public-api/orders")]
-[RequireGuestSession]
 public sealed class OrderController : ControllerBase
 {
     private readonly OrderService _orders;
     public OrderController(OrderService orders) => _orders = orders;
 
     [HttpPost]
+    [RequireGuestSession]
     [EnableRateLimiting("create-order")]
     public async Task<ActionResult<GuestOrderDto>> Create(
         [FromBody] CreateOrderRequest body, CancellationToken ct)
@@ -343,6 +388,7 @@ public sealed class OrderController : ControllerBase
     }
 
     [HttpGet("{id:guid}")]
+    [RequireGuestSession]
     [EnableRateLimiting("order-status")]
     public async Task<ActionResult<GuestOrderDto>> GetById(Guid id, CancellationToken ct)
     {
@@ -351,10 +397,82 @@ public sealed class OrderController : ControllerBase
     }
 
     [HttpGet]
+    [RequireGuestSession]
     [EnableRateLimiting("order-status")]
     public async Task<ActionResult<IReadOnlyList<GuestOrderDto>>> List(CancellationToken ct)
     {
         var s = HttpContext.GetGuestSession();
         return Ok(await _orders.ListForSessionAsync(s.TableSessionId, ct));
+    }
+    // ─── BE-2 ──────────────────────────────────────────────────────────────
+
+    /// <summary>GET /public-api/orders/by-code/{code} — tra đơn qua mã (KHÔNG auth).</summary>
+    [HttpGet("by-code/{code}")]
+    [EnableRateLimiting("menu-read")]
+    public async Task<ActionResult<OrderMinimalDto>> GetByCode(string code, CancellationToken ct)
+        => Ok(await _orders.GetByCodeMinimalAsync(code, ct));
+
+    /// <summary>
+    /// GET /public-api/orders/{id}/status — polling nhẹ cho FE-1 (mỗi 3-5s).
+    /// Trả status + updatedAt only, bandwidth ~10x nhỏ hơn GetById.
+    /// </summary>
+    [HttpGet("{id:guid}/status")]
+    [RequireGuestSession]
+    [EnableRateLimiting("order-status")]
+    public async Task<ActionResult<OrderStatusDto>> GetStatusMinimal(Guid id, CancellationToken ct)
+    {
+        var s = HttpContext.GetGuestSession();
+        return Ok(await _orders.GetStatusMinimalAsync(id, s.TableSessionId, ct));
+    }
+
+    [HttpGet("{id:guid}/receipt")]
+    [RequireGuestSession]
+    [EnableRateLimiting("order-status")]
+    public async Task<ActionResult<OrderReceiptDto>> GetReceipt(Guid id, CancellationToken ct)
+    {
+        var s = HttpContext.GetGuestSession();
+        return Ok(await _orders.GetReceiptAsync(id, s.TableSessionId, ct));
+    }
+
+    [HttpPost("{id:guid}/cancel")]
+    [RequireGuestSession]
+    [EnableRateLimiting("create-order")]
+    public async Task<ActionResult<GuestOrderDto>> Cancel(
+        Guid id, [FromBody] CancelOrderRequest? body, CancellationToken ct)
+    {
+        var s = HttpContext.GetGuestSession();
+        return Ok(await _orders.CancelAsync(id, s.TableSessionId, body?.Reason, ct));
+    }
+
+    [HttpPost("{id:guid}/feedback")]
+    [RequireGuestSession]
+    [EnableRateLimiting("create-order")]
+    public async Task<ActionResult<object>> SubmitFeedback(
+        Guid id, [FromBody] OrderFeedbackRequest body, CancellationToken ct)
+    {
+        var s = HttpContext.GetGuestSession();
+        var fb = await _orders.SubmitFeedbackAsync(id, s.TableSessionId, body, ct);
+        return Ok(new { feedbackId = fb.Id, rating = fb.Rating, comment = fb.Comment, createdAt = fb.CreatedAt });
+    }
+}
+
+// ─── BE-2: StaffCallController ──────────────────────────────────────────────
+
+[ApiController]
+[Route("public-api/call-staff")]
+[RequireGuestSession]
+public sealed class StaffCallController : ControllerBase
+{
+    private readonly StaffCallService _staffCalls;
+    public StaffCallController(StaffCallService staffCalls) => _staffCalls = staffCalls;
+
+    [HttpPost]
+    [EnableRateLimiting("call-staff")]
+    public async Task<ActionResult<StaffCallDto>> Create(
+        [FromBody] CreateStaffCallRequest body, CancellationToken ct)
+    {
+        var s = HttpContext.GetGuestSession();
+        var call = await _staffCalls.CreateAsync(s.TableSessionId, s.TableCode, body, ct);
+        return CreatedAtAction(null, call);
     }
 }
