@@ -1,0 +1,30 @@
+# .NET build artifacts
+bin/
+obj/
+out/
+publish/
+*.user
+*.suo
+*.userprefs
+
+# Rider / Visual Studio
+.vs/
+.idea/
+*.swp
+
+# NuGet
+*.nupkg
+packages/
+
+# Secrets
+appsettings.*.local.json
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

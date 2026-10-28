@@ -1,0 +1,27 @@
+# =============================================================================
+#  docker-compose.staging.yml — STAGING environment
+#  (Buổi 11: Dev/Staging/Prod separation)
+#
+#  Chạy:
+#    docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+# =============================================================================
+
+services:
+  customer-api:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Staging
+      Security__AllowedOrigins__0: ${CUSTOMER_CORS_ORIGIN_STAGING:-https://staging-order.restomanager.com}
+    restart: always
+
+  backend:
+    environment:
+      NODE_ENV: staging
+    restart: always
+
+  postgres:
+    restart: always
+    # Staging không expose port ra host, chỉ cho các service nội bộ dùng.
+    ports: []
+
+  minio:
+    restart: always
