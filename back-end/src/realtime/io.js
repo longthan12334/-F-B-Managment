@@ -1,7 +1,8 @@
 // =============================================================================
 //  Realtime layer (Socket.IO) — hardened
-//  - Bắt buộc xác thực JWT để kết nối (không cho phép guest)
-//  - Chia rooms: 'authenticated', 'role:<role>'
+//  - Staff: xác thực JWT → rooms 'authenticated', 'role:<role>'
+//  - Khách QR (BE-2): xác thực bằng sessionToken của customer-api → CHỈ vào
+//    room 'table:<code>' (không bao giờ vào 'authenticated')
 //  - Mọi event nhạy cảm (orders/invoices) chỉ broadcast vào 'authenticated'
 //  - CORS được cấu hình bởi biến môi trường ALLOWED_ORIGINS
 //
@@ -12,9 +13,26 @@
 //    'order:updated'       → đơn được sửa (thêm món / sửa món / đổi status)
 //    'order:cancelled'     → đơn bị huỷ
 //    'invoice:created'     → có hoá đơn mới (checkout xong)
+//  Event tới khách (room 'table:<code>'):
+//    'order:confirmed' / 'order:rejected' / 'order:status' → đơn khách đổi trạng thái
 // =============================================================================
 const { Server } = require('socket.io');
 const { verifyToken } = require('../middleware/auth');
+const db = require('../database/db');
+
+// Phiên khách còn hiệu lực → trả về table_code, ngược lại null
+async function _findGuestTable(sessionToken) {
+  if (typeof sessionToken !== 'string' || !/^[0-9a-f]{64}$/i.test(sessionToken)) return null;
+  const row = await db.queryOne(`
+    SELECT gts.id AS table_session_id, gts.table_code
+      FROM guest_device_sessions gds
+      JOIN guest_table_sessions gts ON gts.id = gds.table_session_id
+     WHERE gds.session_token = $1
+       AND gts.status = 'active'
+       AND gts.expires_at > NOW()
+  `, [sessionToken]);
+  return row || null;
+}
 
 // Reuse the same allowlist as Express CORS (xem app.js).
 function _parseAllowedOrigins() {
@@ -48,14 +66,21 @@ function init(httpServer) {
   });
 
   // ── Middleware xác thực: BẮT BUỘC token hợp lệ ───────────────────────────
-  _io.use((socket, next) => {
+  _io.use(async (socket, next) => {
     try {
       const token =
         (socket.handshake.auth && socket.handshake.auth.token) ||
         (socket.handshake.query && socket.handshake.query.token) ||
         null;
       if (!token) {
-        // Trước đây cho phép guest → reject ngay để không leak realtime data
+        // Khách QR: chỉ chấp nhận sessionToken qua handshake.auth (không qua query → tránh lộ trong log)
+        const guestToken = socket.handshake.auth && socket.handshake.auth.sessionToken;
+        if (guestToken) {
+          const guest = await _findGuestTable(guestToken);
+          if (!guest) return next(new Error('UNAUTHORIZED: guest session invalid or expired'));
+          socket.guest = guest;
+          return next();
+        }
         return next(new Error('UNAUTHORIZED: token required'));
       }
       socket.user = verifyToken(token);
@@ -69,6 +94,12 @@ function init(httpServer) {
   });
 
   _io.on('connection', (socket) => {
+    if (socket.guest) {
+      socket.join('table:' + socket.guest.table_code);
+      socket.emit('hello', { ok: true, tableCode: socket.guest.table_code, at: new Date().toISOString() });
+      return;
+    }
+
     const u = socket.user || {};
     socket.join('authenticated');
     if (u.role) socket.join('role:' + u.role);
@@ -111,10 +142,17 @@ function emitToRole(role, event, payload) {
   _io.to('role:' + role).emit(event, body);
 }
 
+/** Emit tới khách đang ngồi ở 1 bàn (room 'table:<code>'). */
+function emitToTable(tableCode, event, payload) {
+  if (!_io || !tableCode) return;
+  const body = Object.assign({}, payload || {}, { at: new Date().toISOString() });
+  _io.to('table:' + tableCode).emit(event, body);
+}
+
 function broadcastTablesChanged(meta) { emit('tables:changed', meta || {}); }
 function broadcastOrdersChanged(meta) { emit('orders:changed', meta || {}); }
 
 module.exports = {
-  init, getIO, emit, emitToRole,
+  init, getIO, emit, emitToRole, emitToTable,
   broadcastTablesChanged, broadcastOrdersChanged,
 };

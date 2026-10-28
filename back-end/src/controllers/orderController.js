@@ -3,6 +3,7 @@ const TableModel    = require('../models/Table');
 const InvoiceModel  = require('../models/Invoice');
 const LogModel      = require('../models/Log');
 const realtime      = require('../realtime/io');
+const { syncGuestOrdersFromOrder } = require('./qrOrderingController');
 const { ok, created, paged, paginateArray, asyncHandler, ApiError } = require('../utils/response');
 
 const PAY_METHODS = ['cash', 'card', 'transfer', 'online', 'grab', 'vnpay', 'banking', 'momo', 'zalopay'];
@@ -126,6 +127,7 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   realtime.emit('order:updated', { order: _orderSummary(o), change: 'status', status });
   realtime.broadcastOrdersChanged({ reason: 'status', order_id: o.id, status });
   realtime.broadcastTablesChanged({ reason: 'order_status', table_code: o.table_code });
+  await syncGuestOrdersFromOrder(o.id, o.status);   // BE-2: đồng bộ 2 chiều sang đơn khách QR
   return ok(res, o, { message: 'Cập nhật trạng thái: ' + status });
 });
 
@@ -140,6 +142,7 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   realtime.emit('order:cancelled', { order: _orderSummary(o), reason });
   realtime.broadcastOrdersChanged({ reason: 'cancelled', order_id: o.id });
   realtime.broadcastTablesChanged({ reason: 'order_cancelled', table_code: o.table_code });
+  await syncGuestOrdersFromOrder(o.id, 'cancelled');
   return ok(res, o, { message: 'Hủy order thành công' });
 });
 
@@ -245,6 +248,7 @@ exports.checkout = asyncHandler(async (req, res) => {
   });
   realtime.broadcastOrdersChanged({ reason: 'checkout', order_id: req.params.id });
   realtime.broadcastTablesChanged({ reason: 'checkout', table_code: inv.table_code });
+  await syncGuestOrdersFromOrder(req.params.id, 'completed');
   return created(res, inv, 'Thanh toán thành công');
 });
 
