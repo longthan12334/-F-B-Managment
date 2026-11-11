@@ -1,0 +1,179 @@
+# =============================================================================
+#  RestoManager — Lớp phủ PRODUCTION (VPS + domain + Cloudflare)
+# -----------------------------------------------------------------------------
+#  Dùng kèm tệp gốc, KHÔNG thay thế:
+#
+#      docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+#  Lớp phủ này thay đổi 6 điểm so với môi trường phát triển:
+#
+#   1. THÊM CADDY   — reverse proxy duy nhất mở ra Internet, tự xin và tự gia
+#                     hạn chứng chỉ TLS từ Let's Encrypt. Không cần certbot,
+#                     không cần cron gia hạn.
+#   2. ĐÓNG CỔNG    — postgres, minio, backend KHÔNG còn publish cổng ra host.
+#                     Chỉ Caddy nghe 80/443. Đây là thay đổi bảo mật quan
+#                     trọng nhất: CSDL không còn phơi ra Internet.
+#   3. GIỚI HẠN TÀI NGUYÊN — mỗi container có trần RAM/CPU, một dịch vụ rò rỉ
+#                     bộ nhớ không kéo sập cả VPS.
+#   4. XOAY VÒNG LOG — giới hạn 3 tệp × 10MB, tránh đầy ổ đĩa sau vài tháng.
+#   5. THÊM SAO LƯU  — dịch vụ `backup` dump PostgreSQL hằng ngày.
+#   6. CLOUDFLARED (tuỳ chọn) — Cloudflare Tunnel cho VPS không có IP công
+#                     khai hoặc muốn ẩn hoàn toàn IP máy chủ.
+# =============================================================================
+
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  #  CADDY — cổng vào duy nhất, tự động HTTPS
+  # ───────────────────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: restomanager-caddy
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"     # HTTP/3 (QUIC)
+    environment:
+      DOMAIN:     "${DOMAIN:?DOMAIN bat buoc o production, vi du nhahang.example.com}"
+      ACME_EMAIL: "${ACME_EMAIL:?ACME_EMAIL bat buoc de Lets Encrypt gui canh bao}"
+      CDN_HOST:   ${CDN_HOST:-cdn.${DOMAIN}}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # chứng chỉ TLS — PHẢI giữ qua các lần deploy
+      - caddy_config:/config
+    logging: &default_logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    networks: [restomanager]
+    deploy:
+      resources:
+        limits: { memory: 256M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  postgres:
+    # Không publish cổng: chỉ các container trong mạng nội bộ truy cập được.
+    # Muốn nối pgAdmin từ máy cá nhân thì dùng SSH tunnel:
+    #   ssh -L 5432:localhost:5432 user@vps  (sau khi mở tạm cổng) — hoặc
+    #   docker compose exec postgres psql -U postgres restaurant_db
+    ports: !override []
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=64MB
+      -c log_min_duration_statement=500
+      -c log_checkpoints=on
+    logging: *default_logging
+    deploy:
+      resources:
+        limits: { memory: 1G, cpus: "1.0" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  minio:
+    ports: !override []
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY bat buoc}"
+      MINIO_ROOT_PASSWORD: "${MINIO_SECRET_KEY:?MINIO_SECRET_KEY bat buoc}"
+      MINIO_BROWSER_REDIRECT_URL: https://minio.${DOMAIN}
+      # Tắt giao diện quản trị nếu không cần — giảm bề mặt tấn công
+      MINIO_BROWSER: ${MINIO_BROWSER:-on}
+    logging: *default_logging
+    deploy:
+      resources:
+        limits: { memory: 768M, cpus: "0.5" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  backend:
+    ports: !override []
+    environment:
+      NODE_ENV: production
+      SEED_ON_BOOT: ${SEED_ON_BOOT:-false}
+      TRUST_PROXY: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Ảnh món ăn phục vụ qua subdomain CDN của Cloudflare
+      S3_PUBLIC_URL: ${S3_PUBLIC_URL:-https://cdn.${DOMAIN}}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://${DOMAIN}}
+    logging: *default_logging
+    deploy:
+      resources:
+        limits: { memory: 512M, cpus: "1.0" }
+        reservations: { memory: 192M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  frontend:
+    ports: !override []
+    logging: *default_logging
+    deploy:
+      resources:
+        limits: { memory: 128M, cpus: "0.25" }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  #  SAO LƯU — dump PostgreSQL hằng ngày lúc 03:00 giờ Việt Nam
+  # ───────────────────────────────────────────────────────────────────────────
+  backup:
+    image: postgres:16-alpine
+    container_name: restomanager-backup
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGHOST: postgres
+      PGUSER: ${DB_USER:-postgres}
+      PGPASSWORD: ${DB_PASSWORD:-postgres}
+      PGDATABASE: ${DB_NAME:-restaurant_db}
+      RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      TZ: ${TZ_NAME:-Asia/Ho_Chi_Minh}
+    volumes:
+      - ./backups:/backups
+      - ./deploy/backup.sh:/usr/local/bin/backup.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup.sh"]
+    logging: *default_logging
+    networks: [restomanager]
+    deploy:
+      resources:
+        limits: { memory: 128M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  #  CLOUDFLARE TUNNEL (tuỳ chọn)
+  # -----------------------------------------------------------------------
+  #  Bật khi: VPS không có IP công khai, nằm sau NAT, hoặc bạn muốn KHÔNG mở
+  #  cổng 80/443 nào ra Internet. Tunnel tạo kết nối đi-ra tới Cloudflare,
+  #  Cloudflare chuyển traffic vào qua đường hầm đó.
+  #
+  #  Kích hoạt:  docker compose --profile tunnel up -d
+  #  (và đặt CLOUDFLARE_TUNNEL_TOKEN trong .env)
+  # ───────────────────────────────────────────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: restomanager-tunnel
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    # Kiểm tra token ngay khi chạy thay vì ở bước nội suy biến của Compose —
+    # nếu dùng `:?`, mọi lệnh `docker compose config` đều lỗi dù profile tunnel
+    # không được bật.
+    command: >
+      sh -c "
+      if [ -z \"$$TUNNEL_TOKEN\" ]; then
+        echo 'LỖI: chưa đặt CLOUDFLARE_TUNNEL_TOKEN trong .env — xem DEPLOYMENT.md mục 4B' >&2; exit 1;
+      fi;
+      exec cloudflared tunnel --no-autoupdate run"
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+    depends_on:
+      - caddy
+    logging: *default_logging
+    networks: [restomanager]
+    deploy:
+      resources:
+        limits: { memory: 128M }
+
+volumes:
+  caddy_data:
+    name: restomanager_caddy_data
+  caddy_config:
+    name: restomanager_caddy_config

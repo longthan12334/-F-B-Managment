@@ -1,6 +1,26 @@
-version: "3.9"
+# =============================================================================
+#  RestoManager — Docker Compose (môi trường PHÁT TRIỂN / mặc định)
+# -----------------------------------------------------------------------------
+#  5 dịch vụ:
+#    postgres    PostgreSQL 16 — CSDL duy nhất, dùng chung bởi mọi module
+#    minio       Kho đối tượng tương thích S3 (ảnh món ăn)
+#    minio-init  Tác vụ chạy một lần: tạo bucket + đặt quyền đọc công khai
+#    backend     Modular Monolith (Node 20 + Express + Socket.IO)
+#    frontend    React build sẵn, phục vụ bởi Nginx, proxy /api và /socket.io
+#
+#  Vì sao MỘT container backend chứ không phải mỗi module một container?
+#  Đó chính là định nghĩa của Modular Monolith: ranh giới module nằm ở MÃ NGUỒN
+#  (contract + event bus + kiểm tra ranh giới tự động), không nằm ở ranh giới
+#  tiến trình. Đổi lại ta có giao dịch ACID xuyên module, một lần triển khai,
+#  một nơi xem log — phù hợp quy mô một nhà hàng.
+#
+#  Dùng cho production:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# =============================================================================
+
+name: restomanager
 
 services:
+  # ───────────────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: restomanager-postgres
@@ -9,6 +29,9 @@ services:
       POSTGRES_DB: ${DB_NAME:-restaurant_db}
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      # Đối chiếu tiếng Việt khi ORDER BY tên món
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: ${TZ_NAME:-Asia/Ho_Chi_Minh}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -17,84 +40,136 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-restaurant_db}"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 10s
+    networks: [restomanager]
 
+  # ───────────────────────────────────────────────────────────────────────────
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: restomanager-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_CONSOLE_URL:-http://localhost:9001}
     volumes:
       - minio_data:/data
     ports:
       - "${MINIO_PORT_HOST:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 15s
+    networks: [restomanager]
 
+  # ───────────────────────────────────────────────────────────────────────────
+  # Tạo bucket và đặt chính sách đọc công khai. Backend cũng tự làm việc này
+  # khi khởi động, nhưng giữ lại ở đây để bucket sẵn sàng ngay cả khi chỉ chạy
+  # riêng MinIO (ví dụ khi phát triển frontend).
   minio-init:
-    image: minio/mc:latest
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
     container_name: restomanager-minio-init
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      sleep 2;
-      /usr/bin/mc alias set local http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin};
-      /usr/bin/mc mb --ignore-existing local/${MINIO_BUCKET:-restaurant};
-      /usr/bin/mc anonymous set public local/${MINIO_BUCKET:-restaurant};
-      echo 'MinIO bucket initialised';
-      exit 0;
-      "
+      mc alias set local http://minio:9000 '${MINIO_ACCESS_KEY:-minioadmin}' '${MINIO_SECRET_KEY:-minioadmin}' &&
+      mc mb --ignore-existing local/${MINIO_BUCKET:-restaurant} &&
+      mc anonymous set download local/${MINIO_BUCKET:-restaurant} &&
+      echo '[minio-init] Bucket ${MINIO_BUCKET:-restaurant} đã sẵn sàng' &&
+      exit 0"
+    networks: [restomanager]
 
+  # ───────────────────────────────────────────────────────────────────────────
   backend:
     build:
       context: ./back-end
+      target: runtime
+    image: restomanager/backend:${APP_VERSION:-3.0.0}
     container_name: restomanager-backend
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
     environment:
+      NODE_ENV:   ${NODE_ENV:-development}
+      PORT:       3000
+      APP_VERSION: ${APP_VERSION:-3.0.0}
+      TZ:         ${TZ_NAME:-Asia/Ho_Chi_Minh}
+      TZ_NAME:    ${TZ_NAME:-Asia/Ho_Chi_Minh}
+
+      # ── CSDL ──
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${DB_NAME:-restaurant_db}
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
-      JWT_SECRET: ${JWT_SECRET:-please-change-me-in-prod}
-      JWT_EXPIRES: ${JWT_EXPIRES:-15m}
-      REFRESH_SECRET: ${REFRESH_SECRET:-please-change-me-too-in-prod}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+
+      # ── Xác thực ──
+      JWT_SECRET:      "${JWT_SECRET:?JWT_SECRET bat buoc - chay lenh openssl rand -base64 48}"
+      JWT_EXPIRES:     ${JWT_EXPIRES:-15m}
+      REFRESH_SECRET:  "${REFRESH_SECRET:?REFRESH_SECRET bat buoc va phai khac JWT_SECRET}"
       REFRESH_EXPIRES: ${REFRESH_EXPIRES:-30d}
-      MINIO_ENDPOINT: minio
-      MINIO_PORT: 9000
-      MINIO_USE_SSL: "false"
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
-      MINIO_BUCKET: ${MINIO_BUCKET:-restaurant}
-      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
-      PORT: 3000
+      GUEST_SECRET:    "${GUEST_SECRET:?GUEST_SECRET bat buoc - ky token phien khach QR}"
+
+      # ── CORS ──
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+
+      # ── Kho đối tượng: MinIO (mặc định) / S3 / R2 ──
+      STORAGE_DRIVER:  ${STORAGE_DRIVER:-minio}
+      S3_ENDPOINT:     ${S3_ENDPOINT:-minio}
+      S3_PORT:         ${S3_PORT:-9000}
+      S3_USE_SSL:      ${S3_USE_SSL:-false}
+      S3_REGION:       ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY:   ${MINIO_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY:   ${MINIO_SECRET_KEY:-minioadmin}
+      S3_BUCKET:       ${MINIO_BUCKET:-restaurant}
+      S3_PUBLIC_URL:   ${S3_PUBLIC_URL:-http://localhost:9000}
+      S3_SIGNED_URLS:  ${S3_SIGNED_URLS:-false}
+
+      # ── Khách quét QR ──
+      GUEST_SESSION_TTL_HOURS:   ${GUEST_SESSION_TTL_HOURS:-6}
+      GUEST_REQUIRE_CONFIRMATION: ${GUEST_REQUIRE_CONFIRMATION:-true}
+
+      SEED_ON_BOOT: ${SEED_ON_BOOT:-true}
     ports:
       - "${BACKEND_PORT_HOST:-3000}:3000"
+    networks: [restomanager]
 
+  # ───────────────────────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./front-end
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-}
+    image: restomanager/frontend:${APP_VERSION:-3.0.0}
     container_name: restomanager-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      backend: { condition: service_healthy }
     ports:
       - "${FRONTEND_PORT_HOST:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
+    networks: [restomanager]
 
 volumes:
   postgres_data:
+    name: restomanager_postgres_data
   minio_data:
+    name: restomanager_minio_data
+
+networks:
+  restomanager:
+    name: restomanager_net
+    driver: bridge

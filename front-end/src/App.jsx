@@ -4,6 +4,7 @@
 //  Routes (theo role):
 //
 //    /login                    LoginPage
+//    /order/:tableCode         PublicOrder      — public, khách quét QR tại bàn (không cần đăng nhập)
 //
 //    /admin/dashboard          AdminDashboard   ─┐
 //    /admin/users              AdminUsers        │
@@ -41,6 +42,8 @@ import CashierStats   from './pages/CashierStats';
 import WaiterTables   from './pages/WaiterTables';
 import WaiterMenu     from './pages/WaiterMenu';
 import Profile        from './pages/Profile';
+import PublicOrder    from './pages/PublicOrder';
+import GuestRequests  from './pages/GuestRequests';
 
 function defaultPath(role) {
   if (role === 'admin')   return '/admin/dashboard';
@@ -78,6 +81,11 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
 
+      {/* ── Công khai: khách quét mã QR tại bàn — KHÔNG cần đăng nhập ────── */}
+      {/* :qrKey là qr_slug của bàn (chuỗi ngẫu nhiên). Vẫn chấp nhận mã bàn  */}
+      {/* để các mã QR đã in từ bản cũ không bị vô hiệu.                      */}
+      <Route path="/order/:qrKey" element={<PublicOrder />} />
+
       {/* ── Admin (sidebar layout) ─────────────────────────────────────── */}
       <Route element={<ProtectedRoute roles={['admin']}><AdminShell /></ProtectedRoute>}>
         <Route path="/admin/dashboard" element={<AdminDashboard />} />
@@ -94,6 +102,8 @@ export default function App() {
         <Route path="/cashier/detail/:code" element={<ProtectedRoute roles={['cashier','admin']}><CashierDetail /></ProtectedRoute>} />
         <Route path="/cashier/orders"      element={<ProtectedRoute roles={['cashier','admin']}><CashierOrders /></ProtectedRoute>} />
         <Route path="/cashier/stats"       element={<ProtectedRoute roles={['cashier','admin']}><CashierStats /></ProtectedRoute>} />
+        <Route path="/cashier/guest-requests" element={<ProtectedRoute roles={['cashier','admin']}><GuestRequests /></ProtectedRoute>} />
+        <Route path="/waiter/guest-requests"  element={<ProtectedRoute roles={['waiter','admin']}><GuestRequests /></ProtectedRoute>} />
         <Route path="/waiter/tables"       element={<ProtectedRoute roles={['waiter','admin']}><WaiterTables /></ProtectedRoute>} />
         <Route path="/waiter/menu/:code"   element={<ProtectedRoute roles={['waiter','cashier','admin']}><WaiterMenu /></ProtectedRoute>} />
         <Route path="/profile"             element={<ProtectedRoute><Profile /></ProtectedRoute>} />

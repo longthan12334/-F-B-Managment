@@ -1,26 +1,37 @@
 {
   "name": "restomanager-backend",
-  "version": "1.0.1",
-  "description": "Restaurant Management System — Order, Cashier, Invoice, Admin (PostgreSQL + MinIO + Socket.IO)",
+  "version": "3.0.0",
+  "description": "RestoManager — Hệ thống quản lý nhà hàng theo kiến trúc Modular Monolith (PostgreSQL + MinIO/S3/R2 + Socket.IO)",
   "main": "server.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "seed": "node src/database/seed.js"
+    "check:boundaries": "node tools/check-boundaries.js",
+    "arch:graph": "node tools/architecture-graph.js",
+    "test": "node --test tests/*.test.js",
+    "verify": "npm run check:boundaries && npm test",
+    "test:e2e": "node tests/e2e-smoke.js",
+    "test:realtime": "node tests/realtime-smoke.js"
   },
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.21.0",
-    "express-rate-limit": "^7.4.0",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
     "jsonwebtoken": "^9.0.2",
-    "minio": "^8.0.1",
-    "multer": "^1.4.5-lts.1",
-    "pg": "^8.13.0",
-    "socket.io": "^4.7.5",
+    "minio": "^8.0.2",
+    "multer": "^2.0.2",
+    "pg": "^8.13.1",
+    "socket.io": "^4.8.1",
     "swagger-ui-express": "^5.0.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
   }
 }

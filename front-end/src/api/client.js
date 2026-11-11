@@ -159,7 +159,13 @@ export const Api = {
   updateTable:   (id, d)   => request('/tables/' + id, { method: 'PUT', body: d }),
   deleteTable:   (id)      => request('/tables/' + id, { method: 'DELETE' }),
   setTableActive:(id, on)  => request('/tables/' + id + '/active', { method: 'PATCH', body: { is_active: !!on } }),
-  clearTable:    (id, r)   => request('/tables/' + id + '/clear',  { method: 'POST',  body: r ? { reason: r } : {} }),
+  listZones:     ()        => request('/tables/zones'),
+  // Dữ liệu in mã QR của bàn: { table_code, qr_slug, order_path }
+  tableQr:       (id)      => request('/tables/' + id + '/qr'),
+  // Cấp mã QR mới (mã cũ lập tức vô hiệu)
+  rotateTableQr: (id)      => request('/tables/' + id + '/rotate-qr', { method: 'POST' }),
+  // Dọn bàn nay thuộc module ordering (ghi vào bảng orders) — xem báo cáo mục 5.3
+  clearTable:    (id, r)   => request('/orders/clear-table/' + id,  { method: 'POST', body: r ? { reason: r } : {} }),
 
   // ─── Orders ──────────────────────────────────────────────────────────
   listOrders:           (q) => request('/orders', { query: q }),
@@ -171,7 +177,24 @@ export const Api = {
   removeOrderItem:      (oId, iId)    => request('/orders/' + oId + '/items/' + iId, { method: 'DELETE' }),
   cancelOrder:          (id) => request('/orders/' + id, { method: 'DELETE' }),
   moveOrder:            (id, to) => request('/orders/' + id + '/move', { method: 'POST', body: { to_table_id: to } }),
-  checkout:             (id, p) => request('/orders/' + id + '/checkout', { method: 'POST', body: p }),
+
+  // ─── Món khách gọi qua QR chờ duyệt ──────────────────────────────────
+  // Hàng đợi yêu cầu (gom theo từng lần khách bấm "Gửi")
+  listGuestRequests:   ()    => request('/guest-requests/pending'),
+  guestRequestsOfTable:(tId) => request('/guest-requests/by-table/' + tId),
+  guestSessionsOfTable:(tId) => request('/guest-requests/sessions/by-table/' + tId),
+  // Duyệt / từ chối cả lượt khách gửi
+  reviewGuestRequest:  (rId, approve, reason) =>
+    request('/orders/guest-requests/' + rId + '/review', { method: 'POST', body: { approve, reason } }),
+  // Duyệt / từ chối từng món (khi chỉ hết đúng một món trong lượt gọi)
+  confirmOrderItem:    (oId, iId)         => request('/orders/' + oId + '/items/' + iId + '/confirm', { method: 'POST' }),
+  rejectOrderItem:     (oId, iId, reason) => request('/orders/' + oId + '/items/' + iId + '/reject',  { method: 'POST', body: { reason } }),
+  markItemServed:      (oId, iId)         => request('/orders/' + oId + '/items/' + iId + '/served',  { method: 'POST' }),
+  listPendingItems:    ()                 => request('/orders/pending-items'),
+
+  // ─── Thanh toán ──────────────────────────────────────────────────────
+  // v3: endpoint chính là POST /invoices (hoá đơn thuộc module billing).
+  checkout: (orderId, p) => request('/invoices', { method: 'POST', body: { ...p, order_id: orderId } }),
 
   // ─── Invoices ────────────────────────────────────────────────────────
   listInvoices: (q)  => request('/invoices', { query: q }),
@@ -184,8 +207,9 @@ export const Api = {
   // ─── Logs (admin) ────────────────────────────────────────────────────
   listLogs: (q) => request('/logs', { query: q }),
 
-  // ─── Health ──────────────────────────────────────────────────────────
-  health: () => request('/health'),
+  // ─── Vận hành ────────────────────────────────────────────────────────
+  health:       () => request('/health'),
+  architecture: () => request('/architecture'),
 };
 
 // ─── Format tiền VN ──────────────────────────────────────────────────────

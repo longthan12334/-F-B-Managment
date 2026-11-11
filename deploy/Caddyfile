@@ -1,0 +1,133 @@
+# =============================================================================
+#  Caddy — Reverse proxy + HTTPS tự động
+# -----------------------------------------------------------------------------
+#  Vì sao Caddy mà không phải Nginx + Certbot?
+#    • Tự xin và tự gia hạn chứng chỉ Let's Encrypt — không cron, không quên.
+#    • Mặc định bật HTTP/2, HTTP/3, HSTS, chuyển hướng HTTP→HTTPS.
+#    • Cấu hình ngắn, ít chỗ sai. Với một nhà hàng, đây là lựa chọn ít rủi ro
+#      vận hành nhất.
+#
+#  ⚠ QUAN TRỌNG KHI DÙNG CLOUDFLARE
+#  Nếu bật đám mây cam (proxy) trên Cloudflare, chế độ SSL/TLS trong Cloudflare
+#  PHẢI đặt là **Full (strict)**. Đặt "Flexible" sẽ gây vòng lặp chuyển hướng
+#  vô tận vì Cloudflare gọi về máy chủ bằng HTTP trong khi Caddy ép HTTPS.
+#  Xem DEPLOYMENT.md mục 4 để biết toàn bộ thiết lập Cloudflare.
+# =============================================================================
+
+{
+	email {$ACME_EMAIL}
+	# Bỏ dòng dưới khi chạy thật; chỉ bật khi thử nghiệm để tránh chạm hạn mức
+	# cấp chứng chỉ của Let's Encrypt (5 chứng chỉ/tuần cho mỗi domain).
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+
+	servers {
+		# Tin header X-Forwarded-* từ dải IP của Cloudflare, để backend nhận
+		# đúng IP khách thay vì IP của Cloudflare.
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 \
+			103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 \
+			188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 \
+			104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 \
+			2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 \
+			2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+	}
+}
+
+# ─── Khối dùng chung ─────────────────────────────────────────────────────────
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "SAMEORIGIN"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		Permissions-Policy        "geolocation=(), microphone=(), camera=(self)"
+		-Server
+	}
+}
+
+(compression) {
+	encode zstd gzip
+}
+
+# =============================================================================
+#  Ứng dụng chính — https://{$DOMAIN}
+# =============================================================================
+{$DOMAIN} {
+	import security_headers
+	import compression
+
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+		# Không ghi lại thăm dò sức khoẻ để log khỏi nhiễu
+		# (Caddy chưa hỗ trợ lọc theo path ở đây; lọc khi phân tích log.)
+	}
+
+	# ─── WebSocket (Socket.IO) ────────────────────────────────────────────
+	# Đặt TRƯỚC khối /api/* vì Socket.IO cần giữ kết nối rất lâu.
+	handle /socket.io/* {
+		reverse_proxy backend:3000 {
+			transport http {
+				read_timeout  1h
+				write_timeout 1h
+			}
+		}
+	}
+
+	# ─── REST API ─────────────────────────────────────────────────────────
+	handle /api/* {
+		reverse_proxy backend:3000 {
+			health_uri      /api/health/live
+			health_interval 30s
+			health_timeout  5s
+		}
+	}
+
+	# ─── React SPA ────────────────────────────────────────────────────────
+	# Nginx trong container frontend đã xử lý fallback về index.html.
+	handle {
+		reverse_proxy frontend:80
+	}
+}
+
+# =============================================================================
+#  CDN ảnh món ăn — https://cdn.{$DOMAIN}
+# -----------------------------------------------------------------------------
+#  Trỏ thẳng vào MinIO. Đặt subdomain riêng để:
+#    • Bật proxy Cloudflare riêng cho ảnh (cache tại biên, giảm tải VPS).
+#    • Không lộ cổng 9000 của MinIO ra Internet.
+#    • Dễ chuyển sang Cloudflare R2 sau này: chỉ đổi bản ghi DNS, URL ảnh đã
+#      lưu trong CSDL vẫn đúng.
+# =============================================================================
+cdn.{$DOMAIN} {
+	import security_headers
+	import compression
+
+	# Ảnh món ăn gần như không đổi → cache dài
+	header /restaurant/* Cache-Control "public, max-age=31536000, immutable"
+
+	# Chỉ cho phép đọc; mọi phương thức ghi phải đi qua API của backend
+	@write method POST PUT DELETE PATCH
+	respond @write 405
+
+	reverse_proxy minio:9000
+}
+
+# =============================================================================
+#  Giao diện quản trị MinIO — https://minio.{$DOMAIN}
+# -----------------------------------------------------------------------------
+#  Chỉ bật khi cần. Nếu không dùng, XOÁ cả khối này: mỗi cổng mở là một bề mặt
+#  tấn công. Khuyến nghị thêm Cloudflare Access (Zero Trust) trước nó.
+# =============================================================================
+minio.{$DOMAIN} {
+	import security_headers
+
+	# Giới hạn theo IP văn phòng — thay bằng dải IP thật của bạn rồi bỏ comment
+	# @office remote_ip 203.0.113.0/24
+	# handle @office { reverse_proxy minio:9001 }
+	# respond 403
+
+	reverse_proxy minio:9001
+}

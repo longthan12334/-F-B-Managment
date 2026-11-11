@@ -1,0 +1,40 @@
+# Bí mật — TUYỆT ĐỐI không commit
+.env
+.env.local
+.env.*.local
+back-end/.env
+front-end/.env
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Build
+dist/
+build/
+
+# Sao lưu (chứa dữ liệu thật)
+backups/
+
+# Chứng chỉ TLS do Caddy quản lý
+caddy_data/
+
+# Hệ điều hành & trình soạn thảo
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.vs/
+*.swp
+
+# Kiểm thử
+coverage/
+
+# Expo / mobile
+mobile/.expo/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision

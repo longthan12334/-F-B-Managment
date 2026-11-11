@@ -5,20 +5,22 @@
 // =============================================================================
 import React from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutGrid, Receipt, BarChart3, User, Utensils, LogOut } from 'lucide-react';
+import { LayoutGrid, Receipt, BarChart3, User, Utensils, LogOut, BellRing } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useConfirm } from './Confirm';
 import { useToast } from './Toast';
 
 const NAV_CASHIER = [
-  { to: '/cashier/tables', label: 'Bàn',     icon: LayoutGrid },
-  { to: '/cashier/orders', label: 'Đơn hàng', icon: Receipt },
-  { to: '/cashier/stats',  label: 'Thống kê', icon: BarChart3 },
-  { to: '/profile',        label: 'Cá nhân',  icon: User },
+  { to: '/cashier/tables',         label: 'Bàn',       icon: LayoutGrid },
+  { to: '/cashier/orders',         label: 'Đơn hàng',  icon: Receipt },
+  { to: '/cashier/guest-requests', label: 'Khách gọi', icon: BellRing },
+  { to: '/cashier/stats',          label: 'Thống kê',  icon: BarChart3 },
+  { to: '/profile',                label: 'Cá nhân',   icon: User },
 ];
 const NAV_WAITER = [
-  { to: '/waiter/tables', label: 'Bàn',     icon: LayoutGrid },
-  { to: '/profile',       label: 'Cá nhân', icon: User },
+  { to: '/waiter/tables',         label: 'Bàn',       icon: LayoutGrid },
+  { to: '/waiter/guest-requests', label: 'Khách gọi', icon: BellRing },
+  { to: '/profile',               label: 'Cá nhân',   icon: User },
 ];
 
 export default function AppShell() {
