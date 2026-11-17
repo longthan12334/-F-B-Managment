@@ -107,6 +107,7 @@ function toGuestView(session) {
   };
 }
 
+
 /** Góc nhìn cho nhân viên — thêm dấu vết kỹ thuật phục vụ xử lý sự cố. */
 function toStaffView(session) {
   if (!session) return null;
