@@ -1,0 +1,172 @@
+# =============================================================================
+#  CI — kiểm thử mỗi Pull Request và mỗi lần push (trừ main)
+# -----------------------------------------------------------------------------
+#  Nhánh main không chạy tệp này trực tiếp: deploy.yml gọi lại nó (workflow_call)
+#  rồi mới build image và triển khai, để mã chưa qua test không bao giờ lên VPS.
+# =============================================================================
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  backend:
+    name: Back-end — unit, ranh giới module, e2e, realtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: back-end
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: restaurant_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d restaurant_db"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      NODE_ENV: development
+      PORT: "3000"
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_NAME: restaurant_db
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      # Secret chỉ dùng trong CI, ngẫu nhiên đủ dài, không dùng ở đâu khác
+      JWT_SECRET: ci-only-jwt-9f3c2a7b1e5d4c8a6b0f2e1d3c5a7b9e
+      REFRESH_SECRET: ci-only-refresh-4b8d2f6a0c3e5g7i9k1m3o5q7s9u
+      GUEST_SECRET: ci-only-guest-7h2j4l6n8p0r2t4v6x8z1b3d5f
+      ALLOWED_ORIGINS: http://localhost:5173
+      STORAGE_DRIVER: minio
+      S3_ENDPOINT: 127.0.0.1
+      S3_PORT: "9000"
+      S3_USE_SSL: "false"
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: restaurant
+      S3_PUBLIC_URL: http://127.0.0.1:9000
+      SEED_ON_BOOT: "true"
+      TEST_BASE: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: back-end/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check:boundaries
+      - run: npm test
+
+      - name: Khởi động MinIO (kho ảnh cho e2e)
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          echo "MinIO không khởi động được" >&2; exit 1
+
+      - name: Khởi động back-end
+        run: |
+          nohup node server.js > backend.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:3000/api/health/live >/dev/null && exit 0
+            sleep 1
+          done
+          echo "Back-end không khởi động được" >&2; cat backend.log; exit 1
+
+      - run: npm run test:e2e
+      - run: npm run test:realtime
+
+      - name: Log back-end khi thất bại
+        if: failure()
+        run: tail -n 200 backend.log || true
+
+  # ───────────────────────────────────────────────────────────────────────────
+  frontend:
+    name: Front-end — build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: front-end
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: front-end/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-config:
+    name: Cấu hình triển khai — shellcheck, Caddyfile, compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          shellcheck -S warning deploy/cloud/scripts/*.sh
+          shellcheck -s sh -S warning deploy/cloud/scripts/backup.sh
+
+      - name: Caddyfile hợp lệ (dùng chứng chỉ tự ký tạm)
+        run: |
+          mkdir -p /tmp/certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=ci.example.test" \
+            -keyout /tmp/certs/origin.key -out /tmp/certs/origin.pem
+          cp /tmp/certs/origin.pem /tmp/certs/cloudflare-origin-pull-ca.pem
+          sed 's#/certs/#/tmp/certs/#g' deploy/cloud/Caddyfile > /tmp/Caddyfile
+          for mode in origin_tls origin_tls_aop; do
+            docker run --rm -v /tmp/Caddyfile:/etc/caddy/Caddyfile:ro -v /tmp/certs:/tmp/certs:ro \
+              -e DOMAIN=ci.example.test -e CADDY_TLS=$mode \
+              caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          done
+
+      - name: compose.yml hợp lệ
+        working-directory: deploy/cloud
+        run: |
+          cp env.example .env
+          BACKEND_IMAGE=x FRONTEND_IMAGE=y IMAGE_TAG=ci docker compose -f compose.yml --profile offsite config --quiet
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Chỉ ở Pull Request: build thử image (không đẩy) để bắt lỗi Dockerfile sớm.
+  docker-build:
+    name: Build thử image ${{ matrix.component }}
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - component: backend
+            context: back-end
+          - component: frontend
+            context: front-end
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.component }}

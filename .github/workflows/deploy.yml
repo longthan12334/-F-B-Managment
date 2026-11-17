@@ -1,0 +1,180 @@
+# =============================================================================
+#  CD — main → test → build image → đẩy lên GHCR → triển khai lên VPS
+# -----------------------------------------------------------------------------
+#  Cần cấu hình một lần trong GitHub (Settings → Environments → production):
+#    Secrets  VPS_HOST         IP hoặc tên máy của VPS (KHÔNG dùng tên miền đi qua
+#                              Cloudflare — Cloudflare không chuyển tiếp SSH)
+#             VPS_USER         tài khoản deploy (mặc định trong vps-setup.sh: deploy)
+#             VPS_SSH_KEY      khoá RIÊNG SSH (ed25519) dành riêng cho CI
+#             VPS_KNOWN_HOSTS  kết quả `ssh-keyscan -p <port> <VPS_HOST>`
+#    Variables DOMAIN          tên miền, ví dụ quan.id.vn (để kiểm tra sau deploy)
+#              VPS_PORT        cổng SSH (mặc định 22)
+#              APP_DIR         thư mục trên VPS (mặc định /opt/restomanager)
+#              DOCKER_PLATFORMS  linux/amd64 (mặc định) hoặc linux/arm64 cho EC2 t4g
+#
+#  Triển khai lại / rollback một bản cũ: Actions → Deploy → Run workflow → nhập
+#  image_tag (ví dụ sha-4f2c1ab). Khi có image_tag, bỏ qua test và build.
+# =============================================================================
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag đã có trên GHCR để triển khai lại (bỏ trống = build từ commit này)"
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  test:
+    if: ${{ !inputs.image_tag }}
+    uses: ./.github/workflows/ci.yml
+
+  # ───────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & push ${{ matrix.component }}
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - component: backend
+            context: back-end
+          - component: frontend
+            context: front-end
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tên image (chữ thường — GHCR bắt buộc)
+        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/restomanager-${{ matrix.component }}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@v3
+        if: ${{ contains(vars.DOCKER_PLATFORMS || 'linux/amd64', 'arm64') }}
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # sha-<7 ký tự> là tag bất biến dùng để triển khai/rollback; latest chỉ để tham khảo
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ vars.DOCKER_PLATFORMS || 'linux/amd64' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Triển khai lên VPS
+    needs: [test, build]
+    # Chạy khi build thành công, hoặc khi chỉ triển khai lại một tag có sẵn
+    if: ${{ always() && !cancelled() && (needs.build.result == 'success' || (inputs.image_tag && needs.build.result == 'skipped')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://${{ vars.DOMAIN }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      APP_DIR: ${{ vars.APP_DIR || '/opt/restomanager' }}
+      VPS_PORT: ${{ vars.VPS_PORT || '22' }}
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      INPUT_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xác định tag và tên image
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tag="${INPUT_TAG:-sha-${GITHUB_SHA::7}}"
+          [[ "$tag" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Tag không hợp lệ: $tag" >&2; exit 1; }
+          {
+            echo "TAG=$tag"
+            echo "BACKEND_IMAGE=${REGISTRY}/${owner}/restomanager-backend"
+            echo "FRONTEND_IMAGE=${REGISTRY}/${owner}/restomanager-frontend"
+          } >> "$GITHUB_ENV"
+
+      - name: Cấu hình SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          [[ -n "$VPS_HOST" && -n "$VPS_USER" && -n "$SSH_KEY" && -n "$KNOWN_HOSTS" ]] \
+            || { echo "Thiếu secret VPS_HOST / VPS_USER / VPS_SSH_KEY / VPS_KNOWN_HOSTS" >&2; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host vps
+            HostName ${VPS_HOST}
+            User ${VPS_USER}
+            Port ${VPS_PORT}
+            IdentityFile ~/.ssh/id_deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          EOF
+
+      - name: Chép bộ cấu hình deploy/cloud lên VPS
+        # Không đụng tới .env, certs/, backups/, release.env đang có trên VPS
+        run: |
+          tar -C deploy/cloud -czf - . | ssh vps "mkdir -p '$APP_DIR' && tar -xzf - -C '$APP_DIR' && chmod +x '$APP_DIR'/scripts/*.sh"
+
+      - name: Đăng nhập GHCR trên VPS (token tạm của lần chạy này)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | ssh vps "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+
+      - name: Triển khai (sao lưu → pull → up → kiểm tra → tự rollback)
+        run: ssh vps "cd '$APP_DIR' && ./scripts/release.sh '$TAG' '$BACKEND_IMAGE' '$FRONTEND_IMAGE'"
+
+      - name: Đăng xuất GHCR trên VPS
+        if: always()
+        run: ssh vps "docker logout ghcr.io" || true
+
+      - name: Kiểm tra qua Cloudflare
+        if: ${{ vars.DOMAIN != '' }}
+        env:
+          DOMAIN: ${{ vars.DOMAIN }}
+        run: |
+          for _ in $(seq 1 10); do
+            if curl -fsS --max-time 10 "https://${DOMAIN}/api/health/live"; then
+              echo; echo "https://${DOMAIN} trả lời bình thường."; exit 0
+            fi
+            sleep 6
+          done
+          echo "Không gọi được https://${DOMAIN}/api/health/live qua Cloudflare" >&2; exit 1
