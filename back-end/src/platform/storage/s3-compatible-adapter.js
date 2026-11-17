@@ -12,8 +12,10 @@
 //
 //    STORAGE_DRIVER=r2      → Cloudflare R2
 //        S3_ENDPOINT=<account_id>.r2.cloudflarestorage.com  S3_PORT=443
-//        S3_USE_SSL=true    S3_REGION=auto   S3_SIGNED_URLS=true
-//        S3_PUBLIC_URL=https://cdn.<domain>   (R2 custom domain qua Cloudflare)
+//        S3_USE_SSL=true    S3_REGION=auto
+//        S3_PUBLIC_URL=https://img.<domain>   (custom domain gắn vào bucket)
+//        Mặc định với r2: không tự tạo bucket/policy (S3_MANAGE_BUCKET=false)
+//        và URL ảnh không chứa tên bucket (S3_PUBLIC_URL_INCLUDE_BUCKET=false).
 //
 //  Hai chế độ phát URL ảnh:
 //    • Bucket public-read (MinIO/dev)  → URL tĩnh, cache tốt, không hết hạn.
@@ -80,6 +82,13 @@ class S3CompatibleAdapter extends StoragePort {
   async _tryInit(maxRetries, delayMs) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        if (!this.settings.manageBucket) {
+          // Bucket do người vận hành tạo sẵn (R2/S3). Chỉ kiểm tra đọc được.
+          await this._probe();
+          log.info(`Kho '${this.bucket}' (${this.driverName}) truy cập được — bỏ qua bước tạo bucket/policy`);
+          this.ready = true;
+          return true;
+        }
         const exists = await this.client.bucketExists(this.bucket).catch(() => false);
         if (!exists) {
           await this.client.makeBucket(this.bucket, this.settings.region);
@@ -159,13 +168,42 @@ class S3CompatibleAdapter extends StoragePort {
     if (this.settings.signedUrls) {
       return this.client.presignedGetObject(this.bucket, key, this.settings.signedUrlTtlSec);
     }
-    return `${this.settings.publicUrl}/${this.bucket}/${key}`;
+    return this.settings.publicUrlIncludesBucket
+      ? `${this.settings.publicUrl}/${this.bucket}/${key}`
+      : `${this.settings.publicUrl}/${key}`;
+  }
+
+  /**
+   * Kiểm tra truy cập kho mà không cần quyền cấp tài khoản.
+   * Token R2 "Object Read & Write" chỉ được thao tác trên đối tượng của một bucket
+   * (đọc, ghi, LIỆT KÊ). Liệt kê tối đa 1 đối tượng là phép thử rẻ nhất mà vẫn
+   * phân biệt được: sai bucket (NoSuchBucket), sai khoá (403) và kết nối hỏng.
+   * Không dùng HEAD vì phản hồi HEAD không có nội dung: thiếu bucket và thiếu
+   * đối tượng đều trả về cùng một mã 404.
+   */
+  async _probe() {
+    if (this.settings.manageBucket) {
+      await this.client.bucketExists(this.bucket);
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      const stream = this.client.listObjectsV2(this.bucket, '', false);
+      const done = (err) => {
+        stream.removeAllListeners();
+        stream.on('error', () => {});
+        stream.destroy();
+        err ? reject(err) : resolve();
+      };
+      stream.once('data', () => done());
+      stream.once('end', () => done());
+      stream.once('error', (err) => done(err));
+    });
   }
 
   async healthCheck() {
     const started = Date.now();
     try {
-      await this.client.bucketExists(this.bucket);
+      await this._probe();
       return { ok: true, driver: this.driverName, bucket: this.bucket, latencyMs: Date.now() - started };
     } catch (err) {
       return { ok: false, driver: this.driverName, bucket: this.bucket, error: err.message };

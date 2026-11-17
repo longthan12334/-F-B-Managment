@@ -40,7 +40,10 @@ module.exports = {
       const count = await users.count();
       if (count === 0) {
         await users.seedDefaults(config.seed.defaultPassword);
-        log.info(`Đã tạo 3 tài khoản mặc định (admin/cashier/waiter — mật khẩu: ${config.seed.defaultPassword})`);
+        // Không ghi mật khẩu thật ra log: log của container thường được gom về
+        // nhiều nơi và giữ lâu hơn bản thân mật khẩu.
+        const hint = config.seed.passwordFromEnv ? 'lấy từ SEED_PASSWORD' : `mặc định '${config.seed.defaultPassword}' — chỉ dùng khi phát triển`;
+        log.info(`Đã tạo 3 tài khoản mặc định (admin/cashier/waiter — mật khẩu ${hint}). Hãy đổi mật khẩu ngay.`);
       }
     }
 
