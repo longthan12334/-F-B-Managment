@@ -1,0 +1,212 @@
+# =============================================================================
+#  RestoManager — Production trên VPS sau Cloudflare (image dựng sẵn từ GHCR)
+# -----------------------------------------------------------------------------
+#  Luồng truy cập:
+#
+#    Trình duyệt ──HTTPS (chứng chỉ của Cloudflare)──► Cloudflare Edge
+#               ──HTTPS (Cloudflare Origin CA)──────► Caddy :443 trên VPS
+#               ──HTTP nội bộ 127.0.0.1──────────────► backend :3000 / frontend :8080
+#
+#    Ảnh món ăn: trình duyệt ──► https://img.<domain> ──► Cloudflare R2 (không qua VPS)
+#
+#  Khác biệt với docker-compose.yml + docker-compose.prod.yml cũ:
+#    • KHÔNG build trên VPS: kéo image đã build bởi GitHub Actions (GHCR).
+#    • KHÔNG chạy MinIO: ảnh lưu ở Cloudflare R2.
+#    • Caddy KHÔNG xin Let's Encrypt: dùng chứng chỉ Origin CA của Cloudflare.
+#    • Caddy chạy `network_mode: host` để tường lửa UFW của máy chủ lọc được
+#      cổng 443 (cổng do Docker publish sẽ đi vòng qua UFW). backend/frontend chỉ
+#      publish trên 127.0.0.1 nên Internet không gọi thẳng được.
+#    • backend đọc TOÀN BỘ .env (env_file) — không còn biến bị "rơi" giữa đường.
+#
+#  Không gọi trực tiếp tệp này; dùng scripts/dc.sh (nạp release.env chứa tag image):
+#      ./scripts/dc.sh ps
+#      ./scripts/dc.sh logs -f backend
+# =============================================================================
+
+name: restomanager
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-restaurant_db}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?Thieu DB_PASSWORD trong .env}"
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: ${TZ_NAME:-Asia/Ho_Chi_Minh}
+    # Tham số cho VPS 2 GB RAM. Máy 4 GB trở lên: tăng shared_buffers lên 512MB.
+    command: >
+      postgres
+      -c max_connections=60
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=64MB
+      -c log_min_duration_statement=500
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging: *logging
+    networks: [app]
+    deploy:
+      resources:
+        limits: { memory: 768M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  backend:
+    image: "${BACKEND_IMAGE:?Thieu BACKEND_IMAGE - chay qua scripts/dc.sh}:${IMAGE_TAG:?Thieu IMAGE_TAG - chay qua scripts/dc.sh}"
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    env_file: [.env]
+    environment:
+      # Ghi đè các giá trị phụ thuộc hạ tầng, bất kể .env viết gì
+      NODE_ENV: production
+      PORT: "3000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      TZ: ${TZ_NAME:-Asia/Ho_Chi_Minh}
+      APP_VERSION: ${IMAGE_TAG}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-3000}:3000"
+    logging: *logging
+    networks: [app]
+    deploy:
+      resources:
+        limits: { memory: 512M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Nginx trong image frontend vẫn proxy /api sang `backend:3000` (dùng khi chạy
+  # riêng), nên cần cùng mạng với backend. Ở đây Caddy gọi thẳng backend.
+  frontend:
+    image: "${FRONTEND_IMAGE:?Thieu FRONTEND_IMAGE}:${IMAGE_TAG:?Thieu IMAGE_TAG}"
+    restart: unless-stopped
+    depends_on:
+      backend: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+    logging: *logging
+    networks: [app]
+    deploy:
+      resources:
+        limits: { memory: 64M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [backend, frontend]
+    environment:
+      DOMAIN: "${DOMAIN:?Thieu DOMAIN trong .env}"
+      BACKEND_PORT: ${BACKEND_PORT:-3000}
+      FRONTEND_PORT: ${FRONTEND_PORT:-8080}
+      # origin_tls      : chỉ dùng chứng chỉ Origin CA (mặc định)
+      # origin_tls_aop  : thêm Authenticated Origin Pulls — chỉ chấp nhận kết nối
+      #                   có chứng chỉ client của Cloudflare
+      CADDY_TLS: ${CADDY_TLS:-origin_tls}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logging
+    deploy:
+      resources:
+        limits: { memory: 128M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  #  Sao lưu PostgreSQL hằng ngày vào ./backups (định dạng pg_dump -Fc)
+  # ───────────────────────────────────────────────────────────────────────────
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGHOST: postgres
+      PGUSER: ${DB_USER:-postgres}
+      PGPASSWORD: "${DB_PASSWORD}"
+      PGDATABASE: ${DB_NAME:-restaurant_db}
+      RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      TZ: ${TZ_NAME:-Asia/Ho_Chi_Minh}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup.sh"]
+    # "unhealthy" khi không có bản sao lưu nào mới hơn 26 giờ
+    healthcheck:
+      test: ["CMD-SHELL", "find /backups -maxdepth 1 -name '*.dump' -mmin -1560 | grep -q ."]
+      interval: 30m
+      timeout: 10s
+      start_period: 10m
+      retries: 1
+    logging: *logging
+    networks: [app]
+    deploy:
+      resources:
+        limits: { memory: 256M }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  #  Đẩy bản sao lưu lên một bucket R2 RIÊNG (tuỳ chọn, khuyến nghị)
+  #  Bật:  ./scripts/dc.sh --profile offsite up -d
+  #  Dùng `rclone copy` (không phải sync): xoá ở VPS không xoá trên R2.
+  #  Đặt Object lifecycle rule trên bucket R2 để tự xoá bản cũ (ví dụ 30 ngày).
+  # ───────────────────────────────────────────────────────────────────────────
+  backup-offsite:
+    image: rclone/rclone:1.68
+    restart: unless-stopped
+    profiles: ["offsite"]
+    environment:
+      RCLONE_CONFIG_R2_TYPE: s3
+      RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+      RCLONE_CONFIG_R2_ACCESS_KEY_ID: "${BACKUP_R2_ACCESS_KEY:-}"
+      RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: "${BACKUP_R2_SECRET_KEY:-}"
+      RCLONE_CONFIG_R2_ENDPOINT: "${BACKUP_R2_ENDPOINT:-}"
+      RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+      BACKUP_R2_BUCKET: "${BACKUP_R2_BUCKET:-}"
+      SYNC_INTERVAL_SECONDS: ${BACKUP_SYNC_INTERVAL_SECONDS:-3600}
+    volumes:
+      - ./backups:/backups:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -z "$$BACKUP_R2_BUCKET" ] || [ -z "$$RCLONE_CONFIG_R2_ENDPOINT" ]; then
+          echo "[offsite] Thiếu BACKUP_R2_* trong .env — dừng." >&2; exit 1
+        fi
+        while true; do
+          echo "[offsite] $$(date '+%F %T') đồng bộ /backups -> r2:$$BACKUP_R2_BUCKET"
+          rclone copy /backups "r2:$$BACKUP_R2_BUCKET/db" --include '*.dump' --log-level NOTICE \
+            || echo "[offsite] LỖI: rclone thất bại, thử lại ở vòng sau" >&2
+          sleep "$$SYNC_INTERVAL_SECONDS"
+        done
+    logging: *logging
+    networks: [app]
+    deploy:
+      resources:
+        limits: { memory: 128M }
+
+volumes:
+  postgres_data:
+    name: restomanager_postgres_data
+  caddy_data:
+    name: restomanager_caddy_data
+  caddy_config:
+    name: restomanager_caddy_config
+
+networks:
+  app:
+    name: restomanager_app

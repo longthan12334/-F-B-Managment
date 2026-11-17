@@ -130,7 +130,7 @@ services:
       TZ: ${TZ_NAME:-Asia/Ho_Chi_Minh}
     volumes:
       - ./backups:/backups
-      - ./deploy/backup.sh:/usr/local/bin/backup.sh:ro
+      - ./deploy/cloud/scripts/backup.sh:/usr/local/bin/backup.sh:ro
     entrypoint: ["/bin/sh", "/usr/local/bin/backup.sh"]
     logging: *default_logging
     networks: [restomanager]

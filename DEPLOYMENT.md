@@ -1,5 +1,13 @@
 # Triển khai RestoManager lên VPS với tên miền qua Cloudflare
 
+> **Cách triển khai khuyến nghị đã chuyển sang [DEPLOY-CLOUDFLARE.md](DEPLOY-CLOUDFLARE.md)**:
+> image build sẵn trên GitHub Container Registry, CI/CD bằng GitHub Actions,
+> ảnh lưu trên Cloudflare R2, TLS bằng Cloudflare Origin CA, tường lửa chỉ nhận
+> Cloudflare. Tài liệu dưới đây mô tả cách cũ (build trên VPS, MinIO, Let's
+> Encrypt) và vẫn chạy được. Lưu ý: script sao lưu đã chuyển sang
+> `deploy/cloud/scripts/backup.sh` và tạo tệp `.dump` (pg_dump -Fc) thay vì
+> `.sql.gz` — xem mục Khôi phục.
+
 Tài liệu này hướng dẫn đưa hệ thống lên một máy chủ VPS thật, có tên miền và
 HTTPS, từ máy trắng đến lúc chạy được.
 
@@ -300,7 +308,7 @@ hầm đó.
 
 ```bash
 cd ~/restomanager
-chmod +x deploy/deploy.sh deploy/backup.sh
+chmod +x deploy/deploy.sh deploy/cloud/scripts/*.sh
 ./deploy/deploy.sh
 ```
 
@@ -405,8 +413,9 @@ cd ~/restomanager
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
 
 $COMPOSE stop backend                       # ngừng ghi mới
-gunzip -c backups/restaurant_db-20260301-030000.sql.gz | \
-  $COMPOSE exec -T postgres psql -U postgres restaurant_db
+# Bản .dump do deploy/cloud/scripts/backup.sh tạo (pg_dump -Fc):
+$COMPOSE exec -T postgres pg_restore --clean --if-exists --no-owner \
+  -U postgres -d restaurant_db < backups/restaurant_db-20260301-030000.dump
 $COMPOSE start backend
 ```
 

@@ -1,0 +1,104 @@
+# =============================================================================
+#  Caddy — cổng vào duy nhất trên VPS, đứng SAU Cloudflare
+# -----------------------------------------------------------------------------
+#  Chặng 1  Trình duyệt → Cloudflare : chứng chỉ công khai do Cloudflare cấp.
+#  Chặng 2  Cloudflare  → Caddy      : chứng chỉ Origin CA (certs/origin.pem),
+#                                      chỉ Cloudflare tin, sống tới 15 năm.
+#  Vì vậy ở Cloudflare phải đặt SSL/TLS = Full (strict).
+#
+#  Caddy không xin Let's Encrypt và không mở cổng 80: Cloudflare luôn gọi về
+#  cổng 443, việc chuyển http → https làm ở Cloudflare ("Always Use HTTPS").
+#
+#  Biến môi trường (đặt trong compose.yml): DOMAIN, BACKEND_PORT, FRONTEND_PORT,
+#  CADDY_TLS = origin_tls | origin_tls_aop
+# =============================================================================
+{
+	# Có chứng chỉ thủ công → không cần ACME; tắt luôn listener chuyển hướng :80.
+	auto_https disable_redirects
+
+	servers {
+		# Lấy IP thật của khách từ header Cloudflare cho log và cho backend.
+		# Dải IP từ https://www.cloudflare.com/ips/ (cập nhật khi Cloudflare đổi).
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		client_ip_headers CF-Connecting-IP X-Forwarded-For
+	}
+}
+
+# ─── TLS cho chặng Cloudflare → VPS ──────────────────────────────────────────
+(origin_tls) {
+	tls /certs/origin.pem /certs/origin.key
+}
+
+# Authenticated Origin Pulls: ngoài Origin CA, đòi Cloudflare trình chứng chỉ
+# client. Ai biết IP VPS mà gọi thẳng (không qua Cloudflare) sẽ bị từ chối ngay
+# ở bước bắt tay TLS. Cần tệp certs/cloudflare-origin-pull-ca.pem và bật
+# "Authenticated Origin Pulls" trong dashboard (SSL/TLS → Origin Server).
+(origin_tls_aop) {
+	tls /certs/origin.pem /certs/origin.key {
+		client_auth {
+			mode require_and_verify
+			trusted_ca_cert_file /certs/cloudflare-origin-pull-ca.pem
+		}
+	}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(self)"
+		-Server
+	}
+}
+
+# =============================================================================
+#  Ứng dụng — https://{$DOMAIN}
+# =============================================================================
+https://{$DOMAIN} {
+	import {$CADDY_TLS:origin_tls}
+	import security_headers
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+
+	# Endpoint vận hành không cho người lạ xem (lỗi M-14 trong báo cáo review):
+	# tài liệu API, bản đồ kiến trúc, health chi tiết (lộ số liệu kinh doanh).
+	# Vẫn dùng được trên VPS qua 127.0.0.1:{$BACKEND_PORT:3000} hoặc SSH tunnel.
+	# /api/health/live và /api/health/ready vẫn công khai cho giám sát.
+	# Lưu ý: phải là `handle` (không dùng `respond` trần) vì Caddy xếp `handle`
+	# chạy trước `respond`; các khối handle loại trừ nhau theo thứ tự xuất hiện.
+	@internal path /api/docs /api/docs/* /api/openapi.json /api/architecture /api/health
+	handle @internal {
+		respond "Not Found" 404
+	}
+
+	# WebSocket (Socket.IO) — giữ kết nối lâu
+	handle /socket.io/* {
+		reverse_proxy 127.0.0.1:{$BACKEND_PORT:3000} {
+			transport http {
+				read_timeout 1h
+				write_timeout 1h
+			}
+		}
+	}
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:{$BACKEND_PORT:3000}
+	}
+
+	# React SPA (nginx trong container frontend lo fallback index.html)
+	handle {
+		reverse_proxy 127.0.0.1:{$FRONTEND_PORT:8080}
+	}
+}
+
+# www → tên miền chính (chứng chỉ Origin CA mặc định đã gồm *.{$DOMAIN})
+https://www.{$DOMAIN} {
+	import {$CADDY_TLS:origin_tls}
+	redir https://{$DOMAIN}{uri} permanent
+}
