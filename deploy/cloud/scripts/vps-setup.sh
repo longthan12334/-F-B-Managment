@@ -85,6 +85,15 @@ install -d -m 750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR"
 install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR/certs"
 # Container backup chạy bằng root nên ghi được; tài khoản deploy đọc/ghi bản pre-release.
 install -d -m 750 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR/backups"
+# Chép bộ cấu hình (compose.yml, Caddyfile, env.example, scripts/) vào APP_DIR,
+# không ghi đè tệp đã có. Các lần sau GitHub Actions tự chép bản mới nhất.
+BUNDLE_DIR="$(dirname "$HERE")"
+if [[ -f "$BUNDLE_DIR/compose.yml" && "$(cd "$BUNDLE_DIR" && pwd)" != "$(cd "$APP_DIR" && pwd)" ]]; then
+  cp -rn "$BUNDLE_DIR"/. "$APP_DIR"/
+  chown -R "$DEPLOY_USER:$DEPLOY_USER" "$APP_DIR"
+  chmod +x "$APP_DIR"/scripts/*.sh
+  echo "Đã chép bộ cấu hình vào $APP_DIR"
+fi
 
 step "Swap"
 if [[ "$SWAP_SIZE" != "0" ]] && ! swapon --show | grep -q .; then
@@ -135,7 +144,8 @@ step "XONG"
 cat <<NEXT
 Việc tiếp theo (xem DEPLOY-CLOUDFLARE.md):
   1. Chép chứng chỉ Origin CA vào $APP_DIR/certs/origin.pem và origin.key (chmod 600)
-  2. Tạo $APP_DIR/.env từ env.example (chmod 600) và chạy ./scripts/check-env.sh
+  2. su - $DEPLOY_USER; cd $APP_DIR; cp env.example .env; chmod 600 .env; nano .env
+     rồi chạy ./scripts/check-env.sh
   3. Đẩy mã lên nhánh main để GitHub Actions build và triển khai
 Kiểm tra tường lửa:   ufw status numbered
 NEXT

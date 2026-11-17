@@ -14,7 +14,8 @@
 | Tệp | Nội dung |
 |---|---|
 | 📘 **[BAO_CAO_DU_AN.md](BAO_CAO_DU_AN.md)** | **Báo cáo dự án đầy đủ** — yêu cầu chức năng/phi chức năng, sơ đồ phân rã chức năng, thiết kế hệ thống, ERD và từ điển dữ liệu |
-| 🚀 **[DEPLOYMENT.md](DEPLOYMENT.md)** | Hướng dẫn triển khai VPS + tên miền + Cloudflare, từng bước |
+| 🚀 **[DEPLOY-CLOUDFLARE.md](DEPLOY-CLOUDFLARE.md)** | **Khuyến nghị:** id.vn + Cloudflare (DNS, Origin CA) + R2 + GHCR + GitHub Actions → VPS/EC2 |
+| 📦 [DEPLOYMENT.md](DEPLOYMENT.md) | Cách cũ: build trên VPS, MinIO, Let's Encrypt |
 | 🖼️ `docs/diagrams/` | 25 sơ đồ dạng PNG (ERD, phân rã chức năng, kiến trúc, tuần tự) |
 | 📷 `docs/screenshots/` | Ảnh chụp màn hình thực tế |
 | 📖 `/api/docs` | Swagger UI (khi hệ thống đang chạy) |
