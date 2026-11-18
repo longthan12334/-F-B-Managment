@@ -60,7 +60,7 @@ jobs:
           - component: frontend
             context: front-end
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Tên image (chữ thường — GHCR bắt buộc)
         run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/restomanager-${{ matrix.component }}" >> "$GITHUB_ENV"
@@ -115,7 +115,7 @@ jobs:
       VPS_USER: ${{ secrets.VPS_USER }}
       INPUT_TAG: ${{ inputs.image_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Xác định tag và tên image
         run: |

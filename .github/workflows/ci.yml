@@ -52,16 +52,17 @@ jobs:
       S3_ENDPOINT: 127.0.0.1
       S3_PORT: "9000"
       S3_USE_SSL: "false"
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
+      # s3rver chỉ chấp nhận cặp khoá mặc định S3RVER/S3RVER
+      S3_ACCESS_KEY: S3RVER
+      S3_SECRET_KEY: S3RVER
       S3_BUCKET: restaurant
       S3_PUBLIC_URL: http://127.0.0.1:9000
       SEED_ON_BOOT: "true"
       TEST_BASE: http://127.0.0.1:3000
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -71,16 +72,18 @@ jobs:
       - run: npm run check:boundaries
       - run: npm test
 
-      - name: Khởi động MinIO (kho ảnh cho e2e)
+      # MinIO đã ngừng phát hành image Docker miễn phí (cuối 2025), nên CI dùng
+      # s3rver — máy chủ S3 giả lập viết bằng Node, chỉ để kiểm thử.
+      - name: Khởi động S3 giả lập (s3rver) cho e2e
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
-          for _ in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:9000/minio/health/live && exit 0
+          mkdir -p "$RUNNER_TEMP/s3"
+          nohup npx --yes s3rver@3.7.1 -d "$RUNNER_TEMP/s3" -a 127.0.0.1 -p 9000 -s \
+            --allow-mismatched-signatures > "$RUNNER_TEMP/s3rver.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:9000/ && exit 0
             sleep 1
           done
-          echo "MinIO không khởi động được" >&2; exit 1
+          echo "s3rver không khởi động được" >&2; cat "$RUNNER_TEMP/s3rver.log"; exit 1
 
       - name: Khởi động back-end
         run: |
@@ -107,8 +110,8 @@ jobs:
       run:
         working-directory: front-end
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -122,7 +125,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: shellcheck
         run: |
@@ -163,7 +166,7 @@ jobs:
           - component: frontend
             context: front-end
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
