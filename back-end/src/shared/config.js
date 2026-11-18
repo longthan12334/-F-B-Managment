@@ -32,6 +32,13 @@ const WEAK_SECRETS = new Set([
   'secret', 'changeme', 'jwt-secret', 'dev-secret',
 ]);
 
+/**
+ * Mẫu chuỗi cho thấy secret vẫn là giá trị ví dụ trong tài liệu/.env.example.
+ * Chặn theo MẪU thay vì danh sách cố định: khi .env.example đổi câu chữ, giá trị
+ * mẫu mới vẫn bị bắt (đây là lỗi C-04 trong báo cáo review).
+ */
+const PLACEHOLDER_PATTERN = /doi-gia-tri-nay|change-?me|replace[-_ ]?me|placeholder|example|your[-_]?secret/i;
+
 const fatals = [];
 const warnings = [];
 
@@ -45,7 +52,7 @@ function requireSecret(name, value, { minLength = 32 } = {}) {
     const msg = `${name} chỉ dài ${value.length} ký tự — cần tối thiểu ${minLength}.`;
     isProd ? fatals.push(msg) : warnings.push(msg);
   }
-  if (WEAK_SECRETS.has(value)) {
+  if (WEAK_SECRETS.has(value) || PLACEHOLDER_PATTERN.test(value)) {
     const msg = `${name} đang dùng giá trị mẫu/yếu đã biết.`;
     isProd ? fatals.push(msg) : warnings.push(msg);
   }
@@ -56,9 +63,24 @@ const jwtSecret = requireSecret('JWT_SECRET', process.env.JWT_SECRET);
 const refreshSecret = requireSecret('REFRESH_SECRET', process.env.REFRESH_SECRET);
 const guestSecret = requireSecret('GUEST_SECRET', process.env.GUEST_SECRET, { minLength: 24 });
 
-if (jwtSecret && refreshSecret && jwtSecret === refreshSecret) {
-  const msg = 'JWT_SECRET và REFRESH_SECRET phải khác nhau.';
-  isProd ? fatals.push(msg) : warnings.push(msg);
+// Ba secret phải khác nhau từng đôi: lộ một secret không được kéo theo hai cái còn lại.
+[
+  ['JWT_SECRET', jwtSecret, 'REFRESH_SECRET', refreshSecret],
+  ['JWT_SECRET', jwtSecret, 'GUEST_SECRET', guestSecret],
+  ['REFRESH_SECRET', refreshSecret, 'GUEST_SECRET', guestSecret],
+].forEach(([n1, v1, n2, v2]) => {
+  if (v1 && v2 && v1 === v2) {
+    const msg = `${n1} và ${n2} phải khác nhau.`;
+    isProd ? fatals.push(msg) : warnings.push(msg);
+  }
+});
+
+// Mật khẩu của tài khoản khởi tạo: ở production không được dùng mặc định '123'
+// (lỗi C-03). Chỉ kiểm tra khi thật sự bật tạo dữ liệu mẫu.
+const seedEnabled = bool(process.env.SEED_ON_BOOT, !isProd);
+const seedPassword = process.env.SEED_PASSWORD || '';
+if (isProd && seedEnabled && (seedPassword.length < 12 || PLACEHOLDER_PATTERN.test(seedPassword))) {
+  fatals.push('SEED_ON_BOOT=true ở production cần SEED_PASSWORD mạnh (tối thiểu 12 ký tự, không dùng giá trị mẫu).');
 }
 
 const allowedOrigins = list(process.env.ALLOWED_ORIGINS);
@@ -107,6 +129,14 @@ const config = Object.freeze({
     signedUrls: bool(process.env.S3_SIGNED_URLS, false),
     signedUrlTtlSec: int(process.env.S3_SIGNED_URL_TTL, 3600),
     forcePathStyle: bool(process.env.S3_FORCE_PATH_STYLE, true),
+    // Backend có tự tạo bucket + đặt policy public-read không. Với R2/S3 nên tắt:
+    // token R2 thường chỉ có quyền đọc/ghi đối tượng trong MỘT bucket, và R2 không
+    // hỗ trợ bucket policy. Bucket được tạo và công khai qua dashboard Cloudflare.
+    manageBucket: bool(process.env.S3_MANAGE_BUCKET, (process.env.STORAGE_DRIVER || 'minio').toLowerCase() === 'minio'),
+    // URL ảnh có chứa tên bucket không:
+    //   MinIO/S3 path-style : https://cdn.example.com/<bucket>/<key>
+    //   R2 + custom domain  : https://img.example.com/<key>   (domain gắn thẳng vào bucket)
+    publicUrlIncludesBucket: bool(process.env.S3_PUBLIC_URL_INCLUDE_BUCKET, (process.env.STORAGE_DRIVER || 'minio').toLowerCase() !== 'r2'),
     maxUploadBytes: int(process.env.MAX_UPLOAD_BYTES, 5 * 1024 * 1024),
   }),
 
@@ -146,8 +176,9 @@ const config = Object.freeze({
   }),
 
   seed: Object.freeze({
-    enabled: bool(process.env.SEED_ON_BOOT, !isProd),
-    defaultPassword: process.env.SEED_PASSWORD || '123',
+    enabled: seedEnabled,
+    defaultPassword: seedPassword || '123',
+    passwordFromEnv: Boolean(seedPassword),
   }),
 });
 

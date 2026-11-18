@@ -1,6 +1,6 @@
 // Verify realtime end-to-end directly against the backend (no proxy in between)
 const { io } = require('socket.io-client');
-const API = 'http://127.0.0.1:3000';
+const API = process.env.TEST_BASE || 'http://127.0.0.1:3000';
 const api = async (m, p, o = {}) => {
   const r = await fetch(API + p, { method: m,
     headers: { 'Content-Type': 'application/json',
